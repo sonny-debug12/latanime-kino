@@ -6,8 +6,8 @@
   "entry": "plugin.js",
   "icon": "icon.png",
   "description": "Anime en latino y castellano de latanime.org",
-  "author": "TU-USUARIO",
-  "homepage": "https://github.com/TU-USUARIO/latanime-kino",
+  "author": "sonny-debug12",
+  "homepage": "https://github.com/sonny-debug12/latanime-kino",
   "hosts": [
     "latanime.org",
     "mp4upload.com",
@@ -23,7 +23,13 @@
   ],
   "fetchHosts": "any",
   "streamHosts": "any",
-  "capabilities": ["search", "home", "episodes", "resolve", "download"],
+  "capabilities": [
+    "search",
+    "home",
+    "episodes",
+    "resolve",
+    "download"
+  ],
   "categories": ["anime"],
   "color": "#FF8A00"
 }
