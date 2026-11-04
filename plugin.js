@@ -46,6 +46,31 @@ function abs(path) {
   return new URL(path, BASE).href;
 }
 
+// Base64 seguro para URLs con caracteres fuera de Latin-1.
+function encodeRef(url) {
+  try {
+    return btoa(encodeURIComponent(url));
+  } catch {
+    return btoa(url);
+  }
+}
+
+function decodeRef(value) {
+  let raw;
+
+  try {
+    raw = atob(value);
+  } catch {
+    throw new Error("ref inválida");
+  }
+
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 // Normaliza URLs de imágenes: absolutas, relativas y protocol-relative.
 function imageUrl(value, pageUrl) {
   if (!value || typeof value !== "string") return undefined;
@@ -91,39 +116,68 @@ function srcsetUrl(value) {
   return candidates.length ? candidates[candidates.length - 1] : "";
 }
 
-// Extrae imágenes normales, lazy-load y picture.
+// Extrae portadas normales, lazy-load, picture y fondos CSS.
 function extractImage(block, pageUrl) {
   const tags = [];
-  const imgRe = /<img\b[^>]*>/gi;
+  const tagRe = /<(?:img|source)\b[^>]*>/gi;
   let m;
 
-  while ((m = imgRe.exec(block))) {
+  while ((m = tagRe.exec(block))) {
     tags.push(m[0]);
   }
 
-  for (const tag of tags) {
-    const candidates = [
-      attr(tag, "data-src"),
-      attr(tag, "data-lazy-src"),
-      attr(tag, "data-original"),
-      attr(tag, "data-original-src"),
-      attr(tag, "data-url"),
-      srcsetUrl(attr(tag, "data-srcset")),
-      srcsetUrl(attr(tag, "srcset")),
-      attr(tag, "src"),
-    ];
+  const attributes = [
+    "data-src",
+    "data-lazy-src",
+    "data-original",
+    "data-original-src",
+    "data-image",
+    "data-poster",
+    "data-url",
+    "data-srcset",
+    "srcset",
+    "src",
+  ];
 
-    for (const candidate of candidates) {
+  for (const tag of tags) {
+    for (const name of attributes) {
+      let candidate = attr(tag, name);
+
+      if (name.includes("srcset")) {
+        candidate = srcsetUrl(candidate);
+      }
+
       const url = imageUrl(candidate, pageUrl);
       if (url) return url;
     }
   }
 
-  // Algunos temas ponen la portada como background-image.
-  const bgRe = /background(?:-image)?\s*:\s*url\((['"]?)(.*?)\1\)/i;
-  const bg = bgRe.exec(block);
+  // Fondos CSS.
+  const bgRe =
+    /background(?:-image)?\s*:\s*url\(\s*(['"]?)(.*?)\1\s*\)/gi;
 
-  if (bg) return imageUrl(bg[2], pageUrl);
+  while ((m = bgRe.exec(block))) {
+    const url = imageUrl(m[2], pageUrl);
+    if (url) return url;
+  }
+
+  // Metadatos de portada.
+  const metaRe = /<meta\b[^>]*>/gi;
+
+  while ((m = metaRe.exec(block))) {
+    const tag = m[0];
+    const property = (
+      attr(tag, "property") || attr(tag, "name")
+    ).toLowerCase();
+
+    if (
+      property === "og:image" ||
+      property === "twitter:image"
+    ) {
+      const url = imageUrl(attr(tag, "content"), pageUrl);
+      if (url) return url;
+    }
+  }
 
   return undefined;
 }
@@ -175,46 +229,56 @@ function parseCards(html, prefix) {
   const seen = new Set();
 
   for (let i = 0; i < marks.length && out.length < MAX_ITEMS; i++) {
-    if (seen.has(marks[i].slug)) continue;
-    seen.add(marks[i].slug);
+    const slug = marks[i].slug;
+
+    if (seen.has(slug)) continue;
+    seen.add(slug);
 
     const from = marks[i].at;
     const next =
       i + 1 < marks.length
         ? marks[i + 1].at
-        : Math.min(html.length, from + 2200);
+        : Math.min(html.length, from + 2500);
 
     const chunk = html.slice(from, next);
 
-    // Busca también la imagen que pueda estar antes del enlace.
     const previousEnd =
-      i > 0 ? marks[i - 1].end : Math.max(0, from - 900);
+      i > 0
+        ? marks[i - 1].end
+        : Math.max(0, from - 1500);
 
     const before = html.slice(
-      Math.max(previousEnd, from - 900),
+      Math.max(previousEnd, from - 1500),
       from
     );
 
-    const titleM = /<strong\b[^>]*>([\s\S]*?)<\/strong>/i.exec(chunk);
-
+    // Busca la portada dentro de la tarjeta y antes del enlace.
     const poster =
       extractImage(chunk, BASE + "/") ||
       extractImage(before, BASE + "/");
 
-    const metaM = /(Pelicula|Latino|Castellano|Subtitulado|Anime)/i.exec(
-      chunk
-    );
+    const titleM =
+      /<strong\b[^>]*>([\s\S]*?)<\/strong>/i.exec(chunk) ||
+      /<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/i.exec(chunk) ||
+      /title\s*=\s*(["'])(.*?)\1/i.exec(chunk);
+
+    const title = titleM
+      ? clean(titleM[2] || titleM[1] || titleM[0])
+      : slug.replace(/-/g, " ");
+
+    const metaM =
+      /(Pelicula|Latino|Castellano|Subtitulado|Anime)/i.exec(chunk);
 
     const yearM = /\b(19\d{2}|20\d{2})\b/.exec(chunk);
 
     out.push({
-      slug: marks[i].slug,
-      title: clean(
-        titleM ? titleM[1] : marks[i].slug.replace(/-/g, " ")
-      ),
+      slug,
+      title: clean(title),
       poster,
       year: yearM ? yearM[1] : undefined,
-      movie: !!metaM && metaM[1].toLowerCase() === "pelicula",
+      movie:
+        !!metaM &&
+        metaM[1].toLowerCase() === "pelicula",
     });
   }
 
@@ -562,13 +626,24 @@ export async function resolve(ref) {
 
   const parts = String(ref || "").split("~");
 
+  // Resolver una alternativa seleccionada.
   if (parts[0] === "p") {
     let url;
 
     try {
-      url = atob(parts.slice(1).join("~"));
+      url = decodeRef(parts.slice(1).join("~"));
     } catch {
-      throw kino.error("not_found", "ese servidor ya no sirve");
+      throw kino.error(
+        "not_found",
+        "no se pudo iniciar la reproducción"
+      );
+    }
+
+    if (!/^https?:\/\//i.test(url)) {
+      throw kino.error(
+        "not_found",
+        "no se pudo iniciar la reproducción"
+      );
     }
 
     return await playEmbed(url);
@@ -588,10 +663,10 @@ export async function resolve(ref) {
 
   try {
     html = await episodeHtml(slug, num);
-  } catch (e) {
+  } catch {
     throw kino.error(
       "not_found",
-      "no se pudo abrir el capítulo: " + e.message
+      "no se pudo abrir el capítulo"
     );
   }
 
@@ -614,46 +689,46 @@ export async function resolve(ref) {
     );
 
   let stream = null;
-  let winner = -1;
+  let selectedPlayer = null;
 
+  // Prueba automáticamente los servidores.
+  // No muestra sus nombres ni los errores individuales.
   for (let i = 0; i < ordered.length; i++) {
     try {
       stream = await playEmbed(ordered[i].url);
-      winner = i;
+      selectedPlayer = ordered[i];
       break;
-    } catch (e) {
-      log(
-        "servidor",
-        ordered[i].label,
-        "falló:",
-        e && e.message
-      );
+    } catch {
+      // Continúa con el siguiente servidor.
     }
   }
 
-  if (!stream) {
-    throw kino.error("unavailable", "ningún servidor respondió", {
+  if (!stream || !selectedPlayer) {
+    throw kino.error("unavailable", "no se pudo iniciar la reproducción", {
       userMessage: msg(
-        "Ningún servidor de este capítulo respondió. Prueba otro capítulo o vuelve más tarde.",
-        "No server for this episode answered. Try another episode or come back later."
+        "No se pudo iniciar la reproducción. Prueba otro capítulo o vuelve más tarde.",
+        "Playback could not be started. Try another episode or come back later."
       ),
     });
   }
 
+  // Construye las alternativas excluyendo el servidor principal.
   const alternatives = [];
+  let n = 1;
 
-  for (let i = 0; i < ordered.length; i++) {
-    if (i === winner) continue;
+  for (const player of ordered) {
+    if (player === selectedPlayer) continue;
 
     alternatives.push({
-      label: ordered[i].label,
-      ref: "p~" + btoa(ordered[i].url),
+      label: "Reproducir " + n++,
+      ref: "p~" + encodeRef(player.url),
     });
   }
 
+  // Devuelve el video principal y sus alternativas.
   return {
     ...stream,
-    label: ordered[winner].label,
+    label: "Reproducir",
     alternatives,
   };
 }
